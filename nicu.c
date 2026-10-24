@@ -300,8 +300,7 @@ int main(int argc, char **argv) {
     if (!tok_load(&k, "nicutok.dat")) { printf("Non trovo nicutok.dat.\n"); return 1; }
     pi_buf = malloc(m.V * sizeof(PI));
     rng_state ^= (unsigned long)(now_seconds() * 60.0) + (unsigned long)time(NULL);
-    printf("Nicu e' pronto: %d parametri circa %ldK. Scrivi e premi Invio.\n\n",
-           0, (long)m.V * m.C / 1000 * 0 + 5300);
+    printf("Nicu e' pronto (%.1f milioni di parametri). Scrivi e premi Invio.\n\n", m.nparams / 1e6);
 
     for (;;) {
         double t0;
