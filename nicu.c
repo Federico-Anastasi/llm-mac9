@@ -296,8 +296,8 @@ int main(int argc, char **argv) {
     const char *one_shot = argc > 1 ? argv[1] : NULL;   /* native testing: one message, then exit */
 
     printf("Nicu per Mac OS 9 - caricamento...\n"); fflush(stdout);
-    if (!model_load(&m, "nicu.bin")) { printf("Non trovo nicu.bin (o memoria insufficiente).\n"); return 1; }
-    if (!tok_load(&k, "nicutok.bin")) { printf("Non trovo nicutok.bin.\n"); return 1; }
+    if (!model_load(&m, "nicu.dat")) { printf("Non trovo nicu.dat (o memoria insufficiente).\n"); return 1; }
+    if (!tok_load(&k, "nicutok.dat")) { printf("Non trovo nicutok.dat.\n"); return 1; }
     pi_buf = malloc(m.V * sizeof(PI));
     rng_state ^= (unsigned long)(now_seconds() * 60.0) + (unsigned long)time(NULL);
     printf("Nicu e' pronto: %d parametri circa %ldK. Scrivi e premi Invio.\n\n",

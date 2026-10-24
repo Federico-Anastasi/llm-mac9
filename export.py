@@ -27,7 +27,7 @@ for i in range(cfg["n_layer"]):
 order += ["ln_f.weight", "ln_f.bias"] + ([] if tied else ["head.weight"])
 assert set(order) | {"head.weight"} >= set(sd), set(sd) - set(order)
 
-with open(f"{out}/nicu.bin", "wb") as f:
+with open(f"{out}/nicu.dat", "wb") as f:
     f.write(b"NICU" + struct.pack(">7i", 1, cfg["vocab_size"], cfg["block_size"], cfg["n_layer"],
                                   cfg["n_head"], cfg["n_embd"], int(tied)))
     for k in order: f.write(sd[k].tobytes())
@@ -49,7 +49,7 @@ for s, i in vocab.items():
     raw[i] = s.encode() if s in special else bytes(u2b[c] for c in s)
 byte_id = [vocab[[k for k, v in u2b.items() if v == b][0]] for b in range(256)]
 merges = [m.split(" ") if isinstance(m, str) else m for m in tj["model"]["merges"]]
-with open(f"{out}/nicutok.bin", "wb") as f:
+with open(f"{out}/nicutok.dat", "wb") as f:
     f.write(b"NTOK" + struct.pack(">i", V))
     for r in raw: f.write(struct.pack(">B", len(r)) + r)
     f.write(struct.pack(">256i", *byte_id))

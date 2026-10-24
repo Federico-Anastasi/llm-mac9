@@ -29,7 +29,7 @@ def forward(P, H, ids, gelu):
         x = x + gelu(ln(x, l["ln2w"], l["ln2b"]) @ l["fcw"].T + l["fcb"]) @ l["pw"].T + l["pb"]
     return ln(x, P["lnfw"], P["lnfb"]) @ P["wte"].T
 if __name__ == "__main__":
-    P, H = load("build/nicu.bin")
+    P, H = load("build/nicu.dat")
     ids = np.array([5, 99, 1234, 42, 7, 3000, 11], dtype=np.int64)
     s = ort.InferenceSession("hf/model.onnx")
     print([(i.name, i.shape) for i in s.get_inputs()], [o.name for o in s.get_outputs()])
