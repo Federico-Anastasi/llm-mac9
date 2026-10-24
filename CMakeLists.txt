@@ -6,5 +6,5 @@ add_application(Nicu nicu.c nicu.r
 set_target_properties(Nicu PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(Nicu PRIVATE console)
 target_compile_definitions(Nicu PRIVATE MAC_TARGET)
-target_compile_options(Nicu PRIVATE -O2 -ffast-math -mcpu=7400 -maltivec -mabi=altivec -mvrsave -Wa,-maltivec)
+target_compile_options(Nicu PRIVATE -O2 -ffast-math -mcpu=7400 -maltivec -mabi=altivec -mvrsave -Wa,-maltivec -fno-tree-vectorize -fno-tree-slp-vectorize)
 target_link_libraries(Nicu m)
