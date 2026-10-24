@@ -44,7 +44,7 @@ static void setupEventFunction();
 ConsoleWindow::ConsoleWindow(Rect r, ConstStr255Param title)
 {
     GrafPtr port;
-    win = NewWindow(NULL, &r, "\pRetro68 Console", true, 0, (WindowPtr)-1, true, 0);
+    win = NewWindow(NULL, &r, title, true, 0, (WindowPtr)-1, true, 0);
 
 #if !TARGET_API_MAC_CARBON
     port = win;

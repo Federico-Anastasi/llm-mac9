@@ -1,5 +1,6 @@
-hf/
-build/
+hf*/
+build*/
+artifact/
 *.exe
 *.pdb
 __pycache__/

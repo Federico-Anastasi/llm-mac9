@@ -10,14 +10,19 @@
 #endif
 
 /* ---------- model ---------- */
+/* Big matrices are int8 with one float scale per row; everything else is float32. */
+typedef struct { const unsigned char *q; const float *s; } Q8;
 typedef struct {
     int V, T, L, H, C;
     long nparams;
-    float *wte, *wpe, *lnfw, *lnfb;
-    struct Layer { float *ln1w, *ln1b, *qkvw, *qkvb, *ow, *ob, *ln2w, *ln2b, *fcw, *fcb, *pw, *pb; } *layer;
+    Q8 wte;
+    float *wpe, *lnfw, *lnfb;
+    struct Layer { float *ln1w, *ln1b, *qkvb, *ob, *ln2w, *ln2b, *fcb, *pb; Q8 qkvw, ow, fcw, pw; } *layer;
     float *kc, *vc;                       /* KV cache: [L][T][C] */
     float *x, *xb, *qkv, *att, *hb, *logits;
 } Model;
+
+static float i8[256];                     /* byte -> signed value; avoids slow int->float on the G4 */
 
 static int read_be32(const unsigned char *p) { return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 
@@ -32,37 +37,53 @@ static void *load_file(const char *path, long *size) {
     return buf;
 }
 
+static unsigned char *cur;                /* read cursor into the loaded file */
+static int host_le;
+
+static float *take_f(long n) {            /* n big-endian floats, swapped in place on little-endian hosts */
+    float *w = (float *)cur;
+    if (host_le) {
+        unsigned char *p = cur, t; long i;
+        for (i = 0; i < n; i++, p += 4) { t = p[0]; p[0] = p[3]; p[3] = t; t = p[1]; p[1] = p[2]; p[2] = t; }
+    }
+    cur += 4 * n;
+    return w;
+}
+
+static Q8 take_q(long rows, long cols) {
+    Q8 m;
+    m.s = take_f(rows);
+    m.q = cur; cur += rows * cols;
+    return m;
+}
+
 static int model_load(Model *m, const char *path) {
-    long size, i, n;
+    long size;
     unsigned char *b = load_file(path, &size);
-    float *w;
-    int l, C;
+    int l, C, i;
     union { unsigned int u; unsigned char c[4]; } probe;
-    if (!b || memcmp(b, "NICU", 4) != 0) return 0;
+    if (!b || memcmp(b, "NICU", 4) != 0 || read_be32(b + 4) != 2) return 0;
+    for (i = 0; i < 256; i++) i8[i] = (float)(signed char)i;
+    probe.u = 1; host_le = probe.c[0] == 1;
     m->V = read_be32(b + 8); m->T = read_be32(b + 12); m->L = read_be32(b + 16);
     m->H = read_be32(b + 20); m->C = read_be32(b + 24);
     C = m->C;
-    w = (float *)(b + 32);
-    n = (size - 32) / 4;
-    m->nparams = n;
-    probe.u = 1;
-    if (probe.c[0] == 1) {                /* little-endian host: swap the big-endian floats */
-        unsigned char *p = (unsigned char *)w, t;
-        for (i = 0; i < n; i++, p += 4) { t = p[0]; p[0] = p[3]; p[3] = t; t = p[1]; p[1] = p[2]; p[2] = t; }
-    }
-    m->wte = w; w += (long)m->V * C;
-    m->wpe = w; w += (long)m->T * C;
+    m->nparams = (long)m->V * C + (long)m->T * C + 2L * C + (long)m->L * (12L * C * C + 13L * C);
+    cur = b + 32;
+    m->wte = take_q(m->V, C);
+    m->wpe = take_f((long)m->T * C);
     m->layer = malloc(sizeof(struct Layer) * m->L);
     for (l = 0; l < m->L; l++) {
         struct Layer *y = &m->layer[l];
-        y->ln1w = w; w += C;          y->ln1b = w; w += C;
-        y->qkvw = w; w += 3 * C * C;  y->qkvb = w; w += 3 * C;
-        y->ow = w;   w += C * C;      y->ob = w;   w += C;
-        y->ln2w = w; w += C;          y->ln2b = w; w += C;
-        y->fcw = w;  w += 4 * C * C;  y->fcb = w;  w += 4 * C;
-        y->pw = w;   w += 4 * C * C;  y->pb = w;   w += C;
+        y->ln1w = take_f(C);            y->ln1b = take_f(C);
+        y->qkvw = take_q(3 * C, C);     y->qkvb = take_f(3 * C);
+        y->ow = take_q(C, C);           y->ob = take_f(C);
+        y->ln2w = take_f(C);            y->ln2b = take_f(C);
+        y->fcw = take_q(4 * C, C);      y->fcb = take_f(4 * C);
+        y->pw = take_q(C, 4 * C);       y->pb = take_f(C);
     }
-    m->lnfw = w; w += C; m->lnfb = w; w += C;
+    m->lnfw = take_f(C); m->lnfb = take_f(C);
+    if (cur != b + size) return 0;        /* file layout mismatch */
     m->kc = calloc((long)m->L * m->T * C, sizeof(float));
     m->vc = calloc((long)m->L * m->T * C, sizeof(float));
     m->x = malloc(C * sizeof(float)); m->xb = malloc(C * sizeof(float));
@@ -81,22 +102,28 @@ static void layernorm(float *o, const float *x, const float *w, const float *b, 
     for (i = 0; i < n; i++) o[i] = (x[i] - mean) * s * w[i] + b[i];
 }
 
-/* o[r] = W[r,:] . x + b[r]   (W is rows x cols, row-major) */
-static void matvec(float *o, const float *W, const float *x, const float *b, int rows, int cols) {
+/* o[r] = scale[r] * (Q[r,:] . x) + b[r]   (Q is rows x cols int8, row-major) */
+static void matvec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
     int r, c;
     for (r = 0; r < rows; r++) {
-        const float *w = W + (long)r * cols;
+        const unsigned char *w = W.q + (long)r * cols;
         float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
-        for (c = 0; c + 3 < cols; c += 4) { s0 += w[c] * x[c]; s1 += w[c+1] * x[c+1]; s2 += w[c+2] * x[c+2]; s3 += w[c+3] * x[c+3]; }
-        for (; c < cols; c++) s0 += w[c] * x[c];
-        o[r] = s0 + s1 + s2 + s3 + (b ? b[r] : 0);
+        for (c = 0; c + 3 < cols; c += 4) {
+            s0 += i8[w[c]] * x[c]; s1 += i8[w[c+1]] * x[c+1]; s2 += i8[w[c+2]] * x[c+2]; s3 += i8[w[c+3]] * x[c+3];
+        }
+        for (; c < cols; c++) s0 += i8[w[c]] * x[c];
+        o[r] = (s0 + s1 + s2 + s3) * W.s[r] + (b ? b[r] : 0);
     }
 }
 
 static float *forward(Model *m, int token, int pos) {
     int C = m->C, H = m->H, hd = C / H, l, h, t, i;
     float scale = 1.0f / (float)sqrt((float)hd);
-    for (i = 0; i < C; i++) m->x[i] = m->wte[(long)token * C + i] + m->wpe[(long)pos * C + i];
+    {
+        const unsigned char *e = m->wte.q + (long)token * C;
+        float es = m->wte.s[token];
+        for (i = 0; i < C; i++) m->x[i] = i8[e[i]] * es + m->wpe[(long)pos * C + i];
+    }
     for (l = 0; l < m->L; l++) {
         struct Layer *y = &m->layer[l];
         float *kc = m->kc + (long)l * m->T * C, *vc = m->vc + (long)l * m->T * C;
@@ -300,7 +327,8 @@ int main(int argc, char **argv) {
     if (!tok_load(&k, "nicutok.dat")) { printf("Non trovo nicutok.dat.\n"); return 1; }
     pi_buf = malloc(m.V * sizeof(PI));
     rng_state ^= (unsigned long)(now_seconds() * 60.0) + (unsigned long)time(NULL);
-    printf("Nicu e' pronto (%.1f milioni di parametri). Scrivi e premi Invio.\n\n", m.nparams / 1e6);
+    printf("Nicu e' pronto (%.1f milioni di parametri, pesi a 8 bit).\n", m.nparams / 1e6);
+    printf("Scrivi e premi Invio. Per uscire scrivi: esci\n\n");
 
     for (;;) {
         double t0;
@@ -311,6 +339,7 @@ int main(int argc, char **argv) {
         }
         line[strcspn(line, "\r\n")] = 0;
         if (!line[0]) continue;
+        if (strcmp(line, "esci") == 0) break;
 #ifdef MAC_TARGET
         mac_to_utf8(line, utf);
 #else

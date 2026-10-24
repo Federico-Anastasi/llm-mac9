@@ -1,4 +1,4 @@
-"""Export a Nicu checkpoint to big-endian files for the Mac OS 9 engine.
+"""Export a Nicu checkpoint (int8 weights) to big-endian files for the Mac OS 9 engine.
 usage: python export.py HF_DIR OUT_DIR"""
 import sys, json, struct, pickle, types
 import numpy as np, torch
@@ -27,10 +27,20 @@ for i in range(cfg["n_layer"]):
 order += ["ln_f.weight", "ln_f.bias"] + ([] if tied else ["head.weight"])
 assert set(order) | {"head.weight"} >= set(sd), set(sd) - set(order)
 
+# Weights are int8 (one float scale per row) for the big matrices, float32 for the rest.
+QUANT = ("tok_emb.weight", "head.weight", "attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight")
 with open(f"{out}/nicu.dat", "wb") as f:
-    f.write(b"NICU" + struct.pack(">7i", 1, cfg["vocab_size"], cfg["block_size"], cfg["n_layer"],
+    f.write(b"NICU" + struct.pack(">7i", 2, cfg["vocab_size"], cfg["block_size"], cfg["n_layer"],
                                   cfg["n_head"], cfg["n_embd"], int(tied)))
-    for k in order: f.write(sd[k].tobytes())
+    for k in order:
+        w = sd[k].astype(np.float32)
+        if k.endswith(QUANT):
+            scale = np.abs(w).max(1) / 127.0
+            scale[scale == 0] = 1.0
+            q = np.clip(np.round(w / scale[:, None]), -127, 127).astype(np.int8)
+            f.write(scale.astype(">f4").tobytes() + q.tobytes())
+        else:
+            f.write(w.astype(">f4").tobytes())
 
 # Tokenizer: raw bytes per token, the 256 single-byte ids, merges by rank.
 def bytes_to_unicode():
