@@ -1,0 +1,21 @@
+name: build-mac-os-9
+on: [push, workflow_dispatch]
+jobs:
+  ppc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with Retro68 (PowerPC)
+        run: |
+          docker run --rm -v "$PWD":/root -w /root ghcr.io/autc04/retro68 /bin/bash -c '
+            set -e
+            mkdir -p build && cd build
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/powerpc-apple-macos/cmake/retroppc.toolchain.cmake
+            make VERBOSE=1
+            ls -la'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nicu-ppc
+          path: |
+            build/Nicu.bin
+            build/Nicu.dsk
