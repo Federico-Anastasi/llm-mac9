@@ -194,8 +194,7 @@ static void altivec_check(Model *m) {
     matvec_altivec(a, m->layer[0].fcw, x, NULL, 4 * C, C);
     for (i = 0; i < 4 * C; i++)
         if (fabs(a[i] - s[i]) > 1e-3f * (1.0f + fabs(s[i]))) {
-            printf("
-[AltiVec spento: riga %d, %g invece di %g]", i, a[i], s[i]);
+            printf("[AltiVec spento: riga %d, %g invece di %g]\n", i, a[i], s[i]);
             return;
         }
     use_altivec = 1;
