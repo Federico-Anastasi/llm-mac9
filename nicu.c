@@ -306,6 +306,14 @@ static int sample(float *logits, int V, const int *recent, int nrecent, float te
     return pi_buf[n - 1].i;
 }
 
+/* Mac OS 9 multitasking is cooperative: give background apps (the VNC server) a moment. */
+static void yield_cpu(void) {
+#ifdef MAC_TARGET
+    EventRecord e;
+    WaitNextEvent(0, &e, 0, NULL);
+#endif
+}
+
 static double now_seconds(void) {
 #ifdef MAC_TARGET
     return TickCount() / 60.0;
@@ -353,7 +361,7 @@ int main(int argc, char **argv) {
             n = tok_encode(&k, prompt, ids);
         }
         printf("Nicu:"); fflush(stdout);
-        for (i = 0; i < n; i++) forward(&m, ids[i], pos++);
+        for (i = 0; i < n; i++) { forward(&m, ids[i], pos++); yield_cpu(); }
         t0 = now_seconds(); ng = 0;
         for (;;) {
             tok = sample(m.logits, m.V, gen, ng, 1.0f, 0.92f, 1.15f);
@@ -361,6 +369,7 @@ int main(int argc, char **argv) {
             gen[ng++] = tok;
             emit_bytes(k.tok[tok], k.len[tok]);
             if (pos >= m.T - 1 || ng >= 500) break;
+            yield_cpu();
             forward(&m, tok, pos++);
         }
         if (tok == 0) pos = 0;                      /* dialogue ended: next turn starts fresh */
