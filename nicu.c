@@ -9,7 +9,19 @@
 #include <Events.h>
 #endif
 #ifdef __ALTIVEC__
-#include <altivec.h>
+/* Retro68 ships no altivec.h: use GCC's AltiVec builtins directly. */
+typedef __vector signed char vchar;
+typedef __vector signed short vshort;
+typedef __vector signed int vint;
+typedef __vector float vfloat;
+#define V_LD(off, p)   __builtin_altivec_lvx((off), (const void *)(p))
+#define V_UNPACKH8(v)  __builtin_altivec_vupkhsb(v)
+#define V_UNPACKL8(v)  __builtin_altivec_vupklsb(v)
+#define V_UNPACKH16(v) __builtin_altivec_vupkhsh(v)
+#define V_UNPACKL16(v) __builtin_altivec_vupklsh(v)
+#define V_TOFLOAT(v)   __builtin_altivec_vcfsx((v), 0)
+#define V_MADD(a, b, c) __builtin_altivec_vmaddfp((a), (b), (c))
+#define V_ADD(a, b)    __builtin_altivec_vaddfp((a), (b))
 #endif
 
 /* ---------- model ---------- */
@@ -143,19 +155,19 @@ static int use_altivec;                   /* set at startup after a self-check *
    Needs cols % 16 == 0 and 16-byte aligned rows and x. */
 static void matvec_altivec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
     int r, c;
-    union { vector float v; float f[4]; } sum;
+    union { vfloat v; float f[4]; } sum;
     for (r = 0; r < rows; r++) {
         const signed char *w = (const signed char *)W.q + (long)r * cols;
-        vector float a0 = (vector float)vec_splat_u32(0), a1 = a0, a2 = a0, a3 = a0;
+        vfloat a0 = (vfloat){0, 0, 0, 0}, a1 = a0, a2 = a0, a3 = a0;
         for (c = 0; c < cols; c += 16) {
-            vector signed char q = vec_ld(c, w);
-            vector signed short h = vec_unpackh(q), l = vec_unpackl(q);
-            a0 = vec_madd(vec_ctf(vec_unpackh(h), 0), vec_ld(0, x + c), a0);
-            a1 = vec_madd(vec_ctf(vec_unpackl(h), 0), vec_ld(16, x + c), a1);
-            a2 = vec_madd(vec_ctf(vec_unpackh(l), 0), vec_ld(32, x + c), a2);
-            a3 = vec_madd(vec_ctf(vec_unpackl(l), 0), vec_ld(48, x + c), a3);
+            vchar q = (vchar)V_LD(c, w);
+            vshort h = V_UNPACKH8(q), l = V_UNPACKL8(q);
+            a0 = V_MADD(V_TOFLOAT(V_UNPACKH16(h)), (vfloat)V_LD(0, x + c), a0);
+            a1 = V_MADD(V_TOFLOAT(V_UNPACKL16(h)), (vfloat)V_LD(16, x + c), a1);
+            a2 = V_MADD(V_TOFLOAT(V_UNPACKH16(l)), (vfloat)V_LD(32, x + c), a2);
+            a3 = V_MADD(V_TOFLOAT(V_UNPACKL16(l)), (vfloat)V_LD(48, x + c), a3);
         }
-        sum.v = vec_add(vec_add(a0, a1), vec_add(a2, a3));
+        sum.v = V_ADD(V_ADD(a0, a1), V_ADD(a2, a3));
         o[r] = (sum.f[0] + sum.f[1] + sum.f[2] + sum.f[3]) * W.s[r] + (b ? b[r] : 0);
     }
 }
