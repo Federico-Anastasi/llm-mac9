@@ -153,9 +153,12 @@ static int use_altivec;                   /* set at startup after a self-check *
 #ifdef __ALTIVEC__
 /* Same as matvec_scalar, 16 weights at a time on the G4 vector unit.
    Needs cols % 16 == 0 and 16-byte aligned rows and x. */
+/* Global, so it is 16-byte aligned: the Mac OS 9 stack may not be, and AltiVec
+   stores silently drop the low address bits. */
+static union { vfloat v; float f[4]; } sum __attribute__((aligned(16)));
+
 static void matvec_altivec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
     int r, c;
-    union { vfloat v; float f[4]; } sum;
     for (r = 0; r < rows; r++) {
         const signed char *w = (const signed char *)W.q + (long)r * cols;
         vfloat a0 = (vfloat){0, 0, 0, 0}, a1 = a0, a2 = a0, a3 = a0;
@@ -189,7 +192,12 @@ static void altivec_check(Model *m) {
     for (i = 0; i < C; i++) x[i] = (float)((i * 37) % 19) / 9.0f - 1.0f;
     matvec_scalar(s, m->layer[0].fcw, x, NULL, 4 * C, C);
     matvec_altivec(a, m->layer[0].fcw, x, NULL, 4 * C, C);
-    for (i = 0; i < 4 * C; i++) if (fabs(a[i] - s[i]) > 1e-3f * (1.0f + fabs(s[i]))) return;
+    for (i = 0; i < 4 * C; i++)
+        if (fabs(a[i] - s[i]) > 1e-3f * (1.0f + fabs(s[i]))) {
+            printf("
+[AltiVec spento: riga %d, %g invece di %g]", i, a[i], s[i]);
+            return;
+        }
     use_altivec = 1;
 #else
     (void)m;
