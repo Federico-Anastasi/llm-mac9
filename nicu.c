@@ -153,15 +153,19 @@ static int use_altivec;                   /* set at startup after a self-check *
 #ifdef __ALTIVEC__
 /* Same as matvec_scalar, 16 weights at a time on the G4 vector unit.
    Needs cols % 16 == 0 and 16-byte aligned rows and x. */
-/* Global, so it is 16-byte aligned: the Mac OS 9 stack may not be, and AltiVec
-   stores silently drop the low address bits. */
+/* The Mac OS 9 stack is not 16-byte aligned, and AltiVec loads and stores silently drop
+   the low address bits. So no vector may ever go through the stack: the function is never
+   inlined (no vectors built from the caller's values) and its constants and the horizontal
+   sum live in aligned globals. */
 static union { vfloat v; float f[4]; } sum __attribute__((aligned(16)));
+static const float vzero[4] __attribute__((aligned(16))) = {0, 0, 0, 0};
 
-static void matvec_altivec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
+static void __attribute__((noinline))
+matvec_altivec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
     int r, c;
     for (r = 0; r < rows; r++) {
         const signed char *w = (const signed char *)W.q + (long)r * cols;
-        vfloat a0 = (vfloat){0, 0, 0, 0}, a1 = a0, a2 = a0, a3 = a0;
+        vfloat a0 = (vfloat)V_LD(0, vzero), a1 = a0, a2 = a0, a3 = a0;
         for (c = 0; c < cols; c += 16) {
             vchar q = (vchar)V_LD(c, w);
             vshort h = V_UNPACKH8(q), l = V_UNPACKL8(q);
@@ -183,27 +187,6 @@ static void matvec(float *o, Q8 W, const float *x, const float *b, int rows, int
     matvec_scalar(o, W, x, b, rows, cols);
 }
 
-#ifdef __ALTIVEC__
-/* Temporary diagnostics for a failed self-check: tiny known inputs, printed lane by lane. */
-static signed char dw[64] __attribute__((aligned(16)));
-static float dx[64] __attribute__((aligned(16)));
-static union { vfloat v; float f[4]; } d1 __attribute__((aligned(16))), d2 __attribute__((aligned(16)));
-static void altivec_diag(const unsigned char *wq, const float *x) {
-    int i, c; float o[1]; Q8 W; float one = 1.0f;
-    vfloat acc = (vfloat){0, 0, 0, 0};
-    for (i = 0; i < 64; i++) { dw[i] = 1; dx[i] = 1.0f; }
-    printf("[diag] align wq=%d x=%d stack=%d\n", (int)((size_t)wq & 15), (int)((size_t)x & 15), (int)((size_t)&i & 15));
-    for (c = 0; c < 32; c += 4) acc = V_ADD(acc, (vfloat)V_LD(c * 4, dx));
-    d1.v = acc;
-    printf("[diag] somma float 32x1: %g %g %g %g\n", d1.f[0], d1.f[1], d1.f[2], d1.f[3]);
-    d2.v = V_TOFLOAT(V_UNPACKH16(V_UNPACKH8((vchar)V_LD(0, dw))));
-    printf("[diag] int8->float: %g %g %g %g\n", d2.f[0], d2.f[1], d2.f[2], d2.f[3]);
-    W.q = (const unsigned char *)dw; W.s = &one;
-    matvec_altivec(o, W, dx, NULL, 1, 32); printf("[diag] riga 32 uni: %g (atteso 32)\n", o[0]);
-    matvec_altivec(o, W, dx, NULL, 1, 64); printf("[diag] riga 64 uni: %g (atteso 64)\n", o[0]);
-}
-#endif
-
 /* Turns AltiVec on only if it gives the same numbers as the plain code on a real matrix. */
 static void altivec_check(Model *m) {
 #ifdef __ALTIVEC__
@@ -216,7 +199,6 @@ static void altivec_check(Model *m) {
     for (i = 0; i < 4 * C; i++)
         if (fabs(a[i] - s[i]) > 1e-3f * (1.0f + fabs(s[i]))) {
             printf("[AltiVec spento: riga %d, %g invece di %g]\n", i, a[i], s[i]);
-            altivec_diag(m->layer[0].fcw.q, x);
             return;
         }
     use_altivec = 1;
