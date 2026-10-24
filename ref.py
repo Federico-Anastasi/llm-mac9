@@ -31,7 +31,7 @@ def forward(P, H, ids, gelu):
         x = x + gelu(ln(x, l["ln2w"], l["ln2b"]) @ l["fcw"].T + l["fcb"]) @ l["pw"].T + l["pb"]
     return ln(x, P["lnfw"], P["lnfb"]) @ P["wte"].T
 if __name__ == "__main__":
-    d = sys.argv[1] if len(sys.argv) > 1 else "build"; hf = sys.argv[2] if len(sys.argv) > 2 else "hf"
+    d = sys.argv[1] if len(sys.argv) > 1 else "../strumenti/sito"; hf = sys.argv[2] if len(sys.argv) > 2 else "hf20"
     P, H = load(f"{d}/nicu.dat")
     ids = np.array([5, 99, 1234, 42, 7, 3000, 11], dtype=np.int64)
     s = ort.InferenceSession(f"{hf}/model.onnx")
