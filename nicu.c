@@ -26,14 +26,25 @@ static float i8[256];                     /* byte -> signed value; avoids slow i
 
 static int read_be32(const unsigned char *p) { return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 
-static void *load_file(const char *path, long *size) {
+static void yield_cpu(void);
+
+/* Reads a whole file. With progress, reads 1 MB at a time, printing a dot and
+   yielding between chunks so the screen (and the VNC server) stay alive. */
+static void *load_file(const char *path, long *size, int progress) {
     FILE *f = fopen(path, "rb");
-    void *buf;
+    unsigned char *buf;
+    long done = 0, chunk;
     if (!f) return NULL;
     fseek(f, 0, SEEK_END); *size = ftell(f); fseek(f, 0, SEEK_SET);
     buf = malloc(*size);
-    if (buf && fread(buf, 1, *size, f) != (size_t)*size) { free(buf); buf = NULL; }
+    while (buf && done < *size) {
+        chunk = *size - done < 1048576L ? *size - done : 1048576L;
+        if (fread(buf + done, 1, chunk, f) != (size_t)chunk) { free(buf); buf = NULL; break; }
+        done += chunk;
+        if (progress) { putchar('.'); fflush(stdout); yield_cpu(); }
+    }
     fclose(f);
+    if (progress) printf("\n");
     return buf;
 }
 
@@ -59,7 +70,7 @@ static Q8 take_q(long rows, long cols) {
 
 static int model_load(Model *m, const char *path) {
     long size;
-    unsigned char *b = load_file(path, &size);
+    unsigned char *b = load_file(path, &size, 1);
     int l, C, i;
     union { unsigned int u; unsigned char c[4]; } probe;
     if (!b || memcmp(b, "NICU", 4) != 0 || read_be32(b + 4) != 2) return 0;
@@ -169,7 +180,7 @@ typedef struct {
 
 static int tok_load(Tok *k, const char *path) {
     long size; int i;
-    unsigned char *b = load_file(path, &size), *p;
+    unsigned char *b = load_file(path, &size, 0), *p;
     if (!b || memcmp(b, "NTOK", 4) != 0) return 0;
     k->V = read_be32(b + 4); p = b + 8;
     k->tok = malloc(k->V * sizeof(char *)); k->len = malloc(k->V);
@@ -330,7 +341,8 @@ int main(int argc, char **argv) {
     int pos = 0, n, i, ng, tok;
     const char *one_shot = argc > 1 ? argv[1] : NULL;   /* native testing: one message, then exit */
 
-    printf("Nicu per Mac OS 9 - caricamento...\n"); fflush(stdout);
+    printf("Nicu per Mac OS 9 - caricamento"); fflush(stdout);
+    for (i = 0; i < 30; i++) yield_cpu();     /* let the screen show the first line before the heavy load */
     if (!model_load(&m, "nicu.dat")) { printf("Non trovo nicu.dat (o memoria insufficiente).\n"); return 1; }
     if (!tok_load(&k, "nicutok.dat")) { printf("Non trovo nicutok.dat.\n"); return 1; }
     pi_buf = malloc(m.V * sizeof(PI));
