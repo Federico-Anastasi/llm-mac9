@@ -30,7 +30,7 @@ assert set(order) | {"head.weight"} >= set(sd), set(sd) - set(order)
 # Weights are int8 (one float scale per row) for the big matrices, float32 for the rest.
 QUANT = ("tok_emb.weight", "head.weight", "attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight")
 with open(f"{out}/nicu.dat", "wb") as f:
-    f.write(b"NICU" + struct.pack(">7i", 2, cfg["vocab_size"], cfg["block_size"], cfg["n_layer"],
+    f.write(b"NICU" + struct.pack(">7i", 3, cfg["vocab_size"], cfg["block_size"], cfg["n_layer"],
                                   cfg["n_head"], cfg["n_embd"], int(tied)))
     for k in order:
         w = sd[k].astype(np.float32)
@@ -38,7 +38,9 @@ with open(f"{out}/nicu.dat", "wb") as f:
             scale = np.abs(w).max(1) / 127.0
             scale[scale == 0] = 1.0
             q = np.clip(np.round(w / scale[:, None]), -127, 127).astype(np.int8)
-            f.write(scale.astype(">f4").tobytes() + q.tobytes())
+            f.write(scale.astype(">f4").tobytes())
+            f.write(bytes(-f.tell() % 16))      # AltiVec loads need 16-byte aligned int8 rows
+            f.write(q.tobytes())
         else:
             f.write(w.astype(">f4").tobytes())
 

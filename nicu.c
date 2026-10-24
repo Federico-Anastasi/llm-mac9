@@ -8,6 +8,9 @@
 #ifdef MAC_TARGET
 #include <Events.h>
 #endif
+#ifdef __ALTIVEC__
+#include <altivec.h>
+#endif
 
 /* ---------- model ---------- */
 /* Big matrices are int8 with one float scale per row; everything else is float32. */
@@ -28,6 +31,11 @@ static int read_be32(const unsigned char *p) { return (p[0] << 24) | (p[1] << 16
 
 static void yield_cpu(void);
 
+static void *amalloc(long n) {            /* 16-byte aligned, never freed */
+    unsigned char *p = malloc(n + 16);
+    return p ? (void *)(((size_t)p + 15) & ~(size_t)15) : NULL;
+}
+
 /* Reads a whole file. With progress, reads 1 MB at a time, printing a dot and
    yielding between chunks so the screen (and the VNC server) stay alive. */
 static void *load_file(const char *path, long *size, int progress) {
@@ -36,10 +44,10 @@ static void *load_file(const char *path, long *size, int progress) {
     long done = 0, chunk;
     if (!f) return NULL;
     fseek(f, 0, SEEK_END); *size = ftell(f); fseek(f, 0, SEEK_SET);
-    buf = malloc(*size);
+    buf = amalloc(*size);
     while (buf && done < *size) {
         chunk = *size - done < 1048576L ? *size - done : 1048576L;
-        if (fread(buf + done, 1, chunk, f) != (size_t)chunk) { free(buf); buf = NULL; break; }
+        if (fread(buf + done, 1, chunk, f) != (size_t)chunk) { buf = NULL; break; }
         done += chunk;
         if (progress) { putchar('.'); fflush(stdout); yield_cpu(); }
     }
@@ -48,7 +56,7 @@ static void *load_file(const char *path, long *size, int progress) {
     return buf;
 }
 
-static unsigned char *cur;                /* read cursor into the loaded file */
+static unsigned char *base, *cur;         /* the loaded file (16-byte aligned) and a read cursor */
 static int host_le;
 
 static float *take_f(long n) {            /* n big-endian floats, swapped in place on little-endian hosts */
@@ -64,6 +72,7 @@ static float *take_f(long n) {            /* n big-endian floats, swapped in pla
 static Q8 take_q(long rows, long cols) {
     Q8 m;
     m.s = take_f(rows);
+    cur = base + ((cur - base + 15) & ~15L); /* rows start 16-byte aligned (padding in the file) */
     m.q = cur; cur += rows * cols;
     return m;
 }
@@ -73,14 +82,14 @@ static int model_load(Model *m, const char *path) {
     unsigned char *b = load_file(path, &size, 1);
     int l, C, i;
     union { unsigned int u; unsigned char c[4]; } probe;
-    if (!b || memcmp(b, "NICU", 4) != 0 || read_be32(b + 4) != 2) return 0;
+    if (!b || memcmp(b, "NICU", 4) != 0 || read_be32(b + 4) != 3) return 0;
     for (i = 0; i < 256; i++) i8[i] = (float)(signed char)i;
     probe.u = 1; host_le = probe.c[0] == 1;
     m->V = read_be32(b + 8); m->T = read_be32(b + 12); m->L = read_be32(b + 16);
     m->H = read_be32(b + 20); m->C = read_be32(b + 24);
     C = m->C;
     m->nparams = (long)m->V * C + (long)m->T * C + 2L * C + (long)m->L * (12L * C * C + 13L * C);
-    cur = b + 32;
+    base = b; cur = b + 32;
     m->wte = take_q(m->V, C);
     m->wpe = take_f((long)m->T * C);
     m->layer = malloc(sizeof(struct Layer) * m->L);
@@ -97,9 +106,9 @@ static int model_load(Model *m, const char *path) {
     if (cur != b + size) return 0;        /* file layout mismatch */
     m->kc = calloc((long)m->L * m->T * C, sizeof(float));
     m->vc = calloc((long)m->L * m->T * C, sizeof(float));
-    m->x = malloc(C * sizeof(float)); m->xb = malloc(C * sizeof(float));
-    m->qkv = malloc(3 * C * sizeof(float)); m->att = malloc(m->T * sizeof(float));
-    m->hb = malloc(4 * C * sizeof(float)); m->logits = malloc(m->V * sizeof(float));
+    m->x = amalloc(C * sizeof(float)); m->xb = amalloc(C * sizeof(float));
+    m->qkv = amalloc(3 * C * sizeof(float)); m->att = malloc(m->T * sizeof(float));
+    m->hb = amalloc(4 * C * sizeof(float)); m->logits = malloc(m->V * sizeof(float));
     return m->kc && m->vc && m->logits;
 }
 
@@ -114,7 +123,7 @@ static void layernorm(float *o, const float *x, const float *w, const float *b, 
 }
 
 /* o[r] = scale[r] * (Q[r,:] . x) + b[r]   (Q is rows x cols int8, row-major) */
-static void matvec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
+static void matvec_scalar(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
     int r, c;
     for (r = 0; r < rows; r++) {
         const unsigned char *w = W.q + (long)r * cols;
@@ -125,6 +134,54 @@ static void matvec(float *o, Q8 W, const float *x, const float *b, int rows, int
         for (; c < cols; c++) s0 += i8[w[c]] * x[c];
         o[r] = (s0 + s1 + s2 + s3) * W.s[r] + (b ? b[r] : 0);
     }
+}
+
+static int use_altivec;                   /* set at startup after a self-check */
+
+#ifdef __ALTIVEC__
+/* Same as matvec_scalar, 16 weights at a time on the G4 vector unit.
+   Needs cols % 16 == 0 and 16-byte aligned rows and x. */
+static void matvec_altivec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
+    int r, c;
+    union { vector float v; float f[4]; } sum;
+    for (r = 0; r < rows; r++) {
+        const signed char *w = (const signed char *)W.q + (long)r * cols;
+        vector float a0 = (vector float)vec_splat_u32(0), a1 = a0, a2 = a0, a3 = a0;
+        for (c = 0; c < cols; c += 16) {
+            vector signed char q = vec_ld(c, w);
+            vector signed short h = vec_unpackh(q), l = vec_unpackl(q);
+            a0 = vec_madd(vec_ctf(vec_unpackh(h), 0), vec_ld(0, x + c), a0);
+            a1 = vec_madd(vec_ctf(vec_unpackl(h), 0), vec_ld(16, x + c), a1);
+            a2 = vec_madd(vec_ctf(vec_unpackh(l), 0), vec_ld(32, x + c), a2);
+            a3 = vec_madd(vec_ctf(vec_unpackl(l), 0), vec_ld(48, x + c), a3);
+        }
+        sum.v = vec_add(vec_add(a0, a1), vec_add(a2, a3));
+        o[r] = (sum.f[0] + sum.f[1] + sum.f[2] + sum.f[3]) * W.s[r] + (b ? b[r] : 0);
+    }
+}
+#endif
+
+static void matvec(float *o, Q8 W, const float *x, const float *b, int rows, int cols) {
+#ifdef __ALTIVEC__
+    if (use_altivec) { matvec_altivec(o, W, x, b, rows, cols); return; }
+#endif
+    matvec_scalar(o, W, x, b, rows, cols);
+}
+
+/* Turns AltiVec on only if it gives the same numbers as the plain code on a real matrix. */
+static void altivec_check(Model *m) {
+#ifdef __ALTIVEC__
+    int C = m->C, i;
+    float *x = amalloc(C * sizeof(float)), *a = malloc(4 * C * sizeof(float)), *s = malloc(4 * C * sizeof(float));
+    if (C % 16 || !x || !a || !s) return;
+    for (i = 0; i < C; i++) x[i] = (float)((i * 37) % 19) / 9.0f - 1.0f;
+    matvec_scalar(s, m->layer[0].fcw, x, NULL, 4 * C, C);
+    matvec_altivec(a, m->layer[0].fcw, x, NULL, 4 * C, C);
+    for (i = 0; i < 4 * C; i++) if (fabs(a[i] - s[i]) > 1e-3f * (1.0f + fabs(s[i]))) return;
+    use_altivec = 1;
+#else
+    (void)m;
+#endif
 }
 
 static float *forward(Model *m, int token, int pos) {
@@ -347,7 +404,9 @@ int main(int argc, char **argv) {
     if (!tok_load(&k, "nicutok.dat")) { printf("Non trovo nicutok.dat.\n"); return 1; }
     pi_buf = malloc(m.V * sizeof(PI));
     rng_state ^= (unsigned long)(now_seconds() * 60.0) + (unsigned long)time(NULL);
-    printf("Nicu e' pronto (%.1f milioni di parametri, pesi a 8 bit).\n", m.nparams / 1e6);
+    altivec_check(&m);
+    printf("Nicu e' pronto (%.1f milioni di parametri, pesi a 8 bit%s).\n",
+           m.nparams / 1e6, use_altivec ? ", AltiVec attivo" : "");
     printf("Scrivi e premi Invio. Per uscire scrivi: esci\n\n");
 
     for (;;) {
