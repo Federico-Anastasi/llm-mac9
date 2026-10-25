@@ -49,7 +49,7 @@ static void *amalloc(long n) {            /* 16-byte aligned, never freed */
 }
 
 /* Reads a whole file. With progress, reads 1 MB at a time, printing a dot and
-   yielding between chunks so the screen (and the VNC server) stay alive. */
+   yielding between chunks so the screen and background apps stay responsive. */
 static void *load_file(const char *path, long *size, int progress) {
     FILE *f = fopen(path, "rb");
     unsigned char *buf;
@@ -276,8 +276,8 @@ static int is_letter(unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '
 static int is_digit(unsigned char c) { return c >= '0' && c <= '9'; }
 static int is_space(unsigned char c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; }
 
-/* BPE-merge one pre-token chunk; appends ids to out, returns count */
-static int bpe_chunk(Tok *k, const unsigned char *s, int n, int *out) {
+/* BPE-merge one pre-token chunk; appends at most room ids to out, returns count */
+static int bpe_chunk(Tok *k, const unsigned char *s, int n, int *out, int room) {
     int ids[512], cnt = 0, i, j;
     for (i = 0; i < n && cnt < 512; i++) ids[cnt++] = k->byte_id[s[i]];
     for (;;) {
@@ -290,15 +290,16 @@ static int bpe_chunk(Tok *k, const unsigned char *s, int n, int *out) {
         for (i = at + 1; i + 1 < cnt; i++) ids[i] = ids[i + 1];
         cnt--;
     }
+    if (cnt > room) cnt = room;
     memcpy(out, ids, cnt * sizeof(int));
     return cnt;
 }
 
-/* GPT-2 style pre-tokenization (non-ASCII bytes count as letters), then BPE. */
-static int tok_encode(Tok *k, const char *text, int *out) {
+/* GPT-2 style pre-tokenization (non-ASCII bytes count as letters), then BPE. Writes at most max ids. */
+static int tok_encode(Tok *k, const char *text, int *out, int max) {
     const unsigned char *s = (const unsigned char *)text;
     int n = (int)strlen(text), i = 0, cnt = 0;
-    while (i < n) {
+    while (i < n && cnt < max) {
         int st = i;
         if (s[i] == '\'' && i + 1 < n && strchr("stmd", s[i + 1]) && !(i + 2 < n && is_letter(s[i + 2]))) i += 2;
         else if (s[i] == '\'' && i + 2 < n && ((s[i+1] == 'r' && s[i+2] == 'e') || (s[i+1] == 'v' && s[i+2] == 'e') || (s[i+1] == 'l' && s[i+2] == 'l'))) i += 3;
@@ -312,12 +313,13 @@ static int tok_encode(Tok *k, const char *text, int *out) {
                 if (i < n && i - st > 1 && s[i - 1] == ' ') i--;
             }
         }
-        cnt += bpe_chunk(k, s + st, i - st, out + cnt);
+        cnt += bpe_chunk(k, s + st, i - st, out + cnt, max - cnt);
     }
     return cnt;
 }
 
 /* ---------- Mac Roman <-> UTF-8 ---------- */
+#ifdef MAC_TARGET
 static const unsigned short macroman[128] = {
     0xC4,0xC5,0xC7,0xC9,0xD1,0xD6,0xDC,0xE1,0xE0,0xE2,0xE4,0xE3,0xE5,0xE7,0xE9,0xE8,
     0xEA,0xEB,0xED,0xEC,0xEE,0xEF,0xF1,0xF3,0xF2,0xF4,0xF6,0xF5,0xFA,0xF9,0xFB,0xFC,
@@ -347,8 +349,10 @@ static unsigned char unicode_to_mac(unsigned int u) {
     return '?';
 }
 
-/* Prints UTF-8 bytes as Mac Roman (or raw UTF-8 on a native build), buffering split sequences. */
 static unsigned char u8buf[4]; static int u8len, u8need;
+#endif
+
+/* Prints UTF-8 bytes as Mac Roman (or raw UTF-8 on a native build), buffering split sequences. */
 static void emit_bytes(const unsigned char *b, int n) {
     int i;
     for (i = 0; i < n; i++) {
@@ -397,7 +401,7 @@ static int sample(float *logits, int V, const int *recent, int nrecent, float te
     return pi_buf[n - 1].i;
 }
 
-/* Mac OS 9 multitasking is cooperative: give background apps (the VNC server) a moment. */
+/* Mac OS 9 multitasking is cooperative: give background apps a moment. */
 static void yield_cpu(void) {
 #ifdef MAC_TARGET
     EventRecord e;
@@ -414,9 +418,10 @@ static double now_seconds(void) {
 }
 
 /* ---------- chat ---------- */
+#define MAXIDS 1024
 int main(int argc, char **argv) {
     static Model m; static Tok k;
-    static int ids[1024], gen[512];
+    static int ids[MAXIDS], gen[512];
     static char line[512], utf[1600], prompt[1800];
     int pos = 0, n, i, ng, tok;
     const char *one_shot = argc > 1 ? argv[1] : NULL;   /* native testing: one message, then exit */
@@ -448,11 +453,16 @@ int main(int argc, char **argv) {
         strcpy(utf, line);
 #endif
         sprintf(prompt, "%sUtente: %s\nNicu:", pos ? "\n" : "", utf);
-        n = tok_encode(&k, prompt, ids);
+        n = tok_encode(&k, prompt, ids, MAXIDS);
         if (pos + n + 120 >= m.T) {               /* context full: start a fresh conversation */
             pos = 0;
             sprintf(prompt, "Utente: %s\nNicu:", utf);
-            n = tok_encode(&k, prompt, ids);
+            n = tok_encode(&k, prompt, ids, MAXIDS);
+        }
+        if (n + 120 >= m.T) {                     /* no room left for an answer */
+            printf("Messaggio troppo lungo.\n\n");
+            if (one_shot) break;
+            continue;
         }
         printf("Nicu:"); fflush(stdout);
         for (i = 0; i < n; i++) { forward(&m, ids[i], pos++); yield_cpu(); }
