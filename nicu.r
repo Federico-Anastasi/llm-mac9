@@ -1,4 +1,4 @@
-/* Memory partition: the 5M model needs ~21 MB of weights plus ~7 MB of KV cache. */
+/* Memory partition: Nicu 20M needs ~21 MB of weights plus ~20 MB of KV cache. */
 #include "Processes.r"
 
 resource 'SIZE' (-1) {

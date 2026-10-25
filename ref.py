@@ -1,4 +1,5 @@
-"""Numpy reference forward pass of the int8 export, checked against the official fp32 ONNX."""
+"""Numpy reference forward pass of the int8 export, checked against the official fp32 ONNX.
+usage: python ref.py DAT_DIR HF_DIR"""
 import sys, struct, numpy as np, onnxruntime as ort
 from math import erf
 def load(path):
@@ -16,9 +17,8 @@ def load(path):
     P["lnfw"], P["lnfb"] = take(C), take(C)
     return P, H
 def ln(x, w, b): m = x.mean(-1, keepdims=True); v = ((x-m)**2).mean(-1, keepdims=True); return (x-m)/np.sqrt(v+1e-5)*w+b
-gelu_erf = np.vectorize(lambda x: 0.5*x*(1+erf(x/np.sqrt(2))))
-gelu_tanh = lambda x: 0.5*x*(1+np.tanh(np.sqrt(2/np.pi)*(x+0.044715*x**3)))
-def forward(P, H, ids, gelu):
+gelu = np.vectorize(lambda x: 0.5*x*(1+erf(x/np.sqrt(2))))
+def forward(P, H, ids):
     x = P["wte"][ids] + P["wpe"][:len(ids)]; T, C = x.shape; hd = C // H
     for l in P["layers"]:
         h = ln(x, l["ln1w"], l["ln1b"]) @ l["qkvw"].T + l["qkvb"]
@@ -31,11 +31,11 @@ def forward(P, H, ids, gelu):
         x = x + gelu(ln(x, l["ln2w"], l["ln2b"]) @ l["fcw"].T + l["fcb"]) @ l["pw"].T + l["pb"]
     return ln(x, P["lnfw"], P["lnfb"]) @ P["wte"].T
 if __name__ == "__main__":
-    d = sys.argv[1] if len(sys.argv) > 1 else "../strumenti/sito"; hf = sys.argv[2] if len(sys.argv) > 2 else "hf20"
+    d, hf = sys.argv[1], sys.argv[2]
     P, H = load(f"{d}/nicu.dat")
     ids = np.array([5, 99, 1234, 42, 7, 3000, 11], dtype=np.int64)
     s = ort.InferenceSession(f"{hf}/model.onnx")
     print([(i.name, i.shape) for i in s.get_inputs()], [o.name for o in s.get_outputs()])
     ref = s.run(None, {s.get_inputs()[0].name: ids[None]})[0][0]
-    out = forward(P, H, ids, gelu_erf)
+    out = forward(P, H, ids)
     print("max abs logit diff vs fp32 ONNX:", np.abs(out - ref).max(), "| top-1 agreement:", (out.argmax(-1) == ref.argmax(-1)).mean())
