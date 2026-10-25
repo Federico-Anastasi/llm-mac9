@@ -1,6 +1,5 @@
-hf*/
 build*/
-artifact/
+*.dat
 *.exe
 *.pdb
 __pycache__/
